@@ -41,8 +41,10 @@ pnpm test            # Suíte completa
 ## Documentação Contínua
 
 - [Arquitetura](./docs/ARCHITECTURE.md)
+- [Tutorial Completo & Guia das 15 Seções](./docs/TUTORIAL.md)
 - [Banco de Dados & Migrations](./docs/DATABASE.md)
 - [Referência de APIs](./docs/API.md)
 - [Especificação Studio GDD](./docs/FEATURES/gdd-studio.md)
+- [Layout Studio v2 & Wizard 3 Passos](./docs/FEATURES/layout-studio-v2.md)
 - [Changelog](./docs/CHANGELOG.md)
 - [Skill de Padrões de Engenharia](./.agents/skills/agentgdd-standards/SKILL.md)

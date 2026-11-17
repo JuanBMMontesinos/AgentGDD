@@ -27,7 +27,8 @@ flowchart LR
 | `src/lib/ai/` | Server-side `@google/genai` client and multi-stage section generation/refinement/moodboard orchestrator. |
 | `src/lib/supabase/` | Browser, server SSR, and admin Supabase helpers + session auth guards. |
 | `src/app/api/` | Authenticated Route Handlers for projects, sections, entities, generation streaming, audits, versioning, comments, and exports. |
-| `src/components/` | Accessible, dark/light-aware Studio UI components (Wizard, Section Navigator, Markdown/Mermaid Viewer, HEX Palette Swatches, Entity Tables, Audit Panel). |
+| `src/app/new/` & `src/app/guide/` | Dedicated 3-step GDD Creation Wizard (`/new`) and Interactive Tutorial & 15-Section Guide (`/guide`). |
+| `src/components/` | Accessible, dark/light-aware Studio UI components (Project Hub, 3-Step Wizard, 3-Zone Studio Workspace, Markdown/Mermaid Viewer, HEX Palette Swatches, Entity Tables, Audit Panel). |
 | `tests/unit/` | Playwright pure unit tests (`--project=unit`). |
 | `tests/api/` | Playwright API tests (`--project=api`). |
 | `tests/e2e/` | Playwright Chromium end-to-end tests (`--project=e2e`). |

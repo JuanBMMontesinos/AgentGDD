@@ -2,7 +2,25 @@
 
 All notable changes, resource insertions, database migrations, documentation updates, and test additions for **AgentGDD** are documented in this file.
 
-## [Unreleased] - 2026-11-16
+## [Unreleased] - 2026-11-17
+
+### Added
+- **Dedicated 3-Step Creation Route (`src/app/new/page.tsx`)**: Moved creation flow out of `/` into a focused 3-step Wizard supporting `?template=<slug>` pre-loading.
+- **Interactive Tutorial Page (`src/app/guide/page.tsx`, `docs/TUTORIAL.md`)**: Added in-app tutorial explaining the full workflow and every one of the 15 GDD sections grouped into Blocks A–D.
+- **Project Hub Component (`src/components/ProjectsDashboardClient.tsx`)**: Added project search, quick-start template links, and accessible `<dialog>` deletion confirmation on `/`.
+- **Section Discipline Metadata (`src/lib/gdd/sections.ts`, `src/types/gdd.ts`)**: Added `getSectionGroups()`, `getSectionDefinitionByNumber()`, contextual `summary`, `whyItMatters`, `specialToolHint`, and `exampleRefinePrompts` per section.
+
+### Changed
+- **3-Step Wizard (`src/components/NewGddWizard.tsx`)**: Refactored single long form into progressive 3-step stepper (`Ideia & Template` → `Arquitetura & Escopo` → `Formato & Geração`).
+- **3-Zone Studio Workspace (`src/components/GddStudioWorkspace.tsx`, `src/components/Navbar.tsx`)**: Grouped sidebar sections into collapsible Blocks A–D separated from global project tools (`Tabelas`, `Moodboard`, `Versões`), consolidated `Exportar` and `Compartilhar` into clean disclosure panels, added contextual per-section help banner, and made the Right Copilot & Notes drawer closed by default.
+
+### Tests
+- **Playwright (`tests/unit/sections-metadata.spec.ts`, `tests/e2e/gdd-studio.spec.ts`)**: Added unit tests for section grouping/metadata and updated E2E suite for `/guide`, `/new` 3-step flow, Studio drawer state, and Export/Share disclosures.
+
+### Docs
+- Created `docs/TUTORIAL.md` and `docs/FEATURES/layout-studio-v2.md`; updated `docs/ARCHITECTURE.md` and `docs/CHANGELOG.md`.
+
+## [0.1.0] - 2026-11-16
 
 ### Added
 - **Engineering Skill (`.agents/skills/agentgdd-standards/SKILL.md`)**: Memorizes mandatory documentation updates, direct Supabase migration rules, Playwright unit/API/E2E test requirements, and Git pre-commit checks.

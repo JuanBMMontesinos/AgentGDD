@@ -1,6 +1,6 @@
 'use client';
 
-import { Gamepad2, LogOut, PlusCircle } from 'lucide-react';
+import { BookOpen, Gamepad2, LogOut, PlusCircle } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -11,7 +11,7 @@ interface NavbarProps {
 }
 
 /**
- * Primary studio navigation bar with authentication state and theme switcher.
+ * Primary studio navigation bar with quick links to Projects, New Wizard, Tutorial Guide, and theme toggle.
  */
 export function Navbar({ userEmail }: NavbarProps) {
   const router = useRouter();
@@ -44,13 +44,26 @@ export function Navbar({ userEmail }: NavbarProps) {
           </span>
         </Link>
 
-        <nav aria-label="Principal" className="flex flex-wrap items-center gap-2.5">
+        <nav aria-label="Principal" className="flex flex-wrap items-center gap-2">
+          <Link
+            href="/guide"
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition hover:opacity-90"
+            style={{
+              borderColor: 'var(--border-subtle)',
+              backgroundColor: 'var(--bg-elevated)',
+              color: 'var(--text-primary)',
+            }}
+          >
+            <BookOpen className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Tutorial & Seções</span>
+          </Link>
+
           <ThemeToggle />
 
           {userEmail ? (
             <>
               <Link
-                href="/#new-gdd-wizard"
+                href="/new"
                 className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition hover:opacity-90"
                 style={{
                   backgroundColor: 'var(--brand)',
@@ -62,7 +75,7 @@ export function Navbar({ userEmail }: NavbarProps) {
               </Link>
 
               <span
-                className="hidden text-xs sm:inline"
+                className="hidden text-xs md:inline"
                 style={{ color: 'var(--text-muted)' }}
               >
                 {userEmail}

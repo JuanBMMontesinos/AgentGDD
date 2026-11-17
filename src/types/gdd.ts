@@ -60,15 +60,25 @@ export interface TechnicalWarning {
 }
 
 /**
- * Canonical section blueprint item.
+ * Discipline group keys used to organize the 15 GDD sections in the Studio sidebar.
+ */
+export type GddSectionGroupId = 'A' | 'B' | 'C' | 'D';
+
+/**
+ * Canonical section blueprint item including contextual Studio guidance.
  */
 export interface GddSectionDefinition {
   number: number;
   key: string;
   title: string;
+  groupId: GddSectionGroupId;
   optional: boolean;
   requiredChecklistId?: string;
   expectedSubsections: string[];
+  summary: string;
+  whyItMatters: string;
+  specialToolHint?: string;
+  exampleRefinePrompts: string[];
 }
 
 /**
