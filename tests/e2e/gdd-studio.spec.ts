@@ -35,11 +35,30 @@ test.describe('AgentGDD Studio v2 End-to-End Tests', () => {
     await expect(page.getByRole('link', { name: 'Criar Novo GDD' })).toBeVisible();
   });
 
-  test('full v2 studio flow: 3-step /new wizard, grouped sidebar, closed-by-default copilot, export disclosure, audit, tables & share', async ({
+  test('full v2/v3 studio flow: locked submit, live SSE progress, progressive lock, cancel & resume, copilot, export, audit, tables & share', async ({
     page,
     browser,
   }) => {
     await signInAndEnableMockAi(page, testUser.email, testUser.password);
+
+    // Slow down first /generate call so Playwright deterministically inspects active SSE & cancellation states
+    let generateAttempts = 0;
+    await page.route('**/api/projects/*/generate', async (route) => {
+      if (route.request().method() === 'POST') {
+        generateAttempts += 1;
+        if (generateAttempts === 1) {
+          await route.fallback({
+            headers: {
+              ...route.request().headers(),
+              'x-mock-ai': '1',
+              'x-mock-stage-delay-ms': '1200',
+            },
+          });
+          return;
+        }
+      }
+      await route.fallback();
+    });
 
     // Navigate to dedicated /new 3-step wizard
     await page.getByRole('link', { name: 'Criar Novo GDD' }).click();
@@ -57,15 +76,53 @@ test.describe('AgentGDD Studio v2 End-to-End Tests', () => {
     await page.getByLabel('Web (HTML5/WebGL)').uncheck();
     await page.getByRole('button', { name: /Avançar para Revisão/i }).click();
 
-    // Step 3: Verify summary and create project
+    // Step 3: Delay project creation slightly to verify anti-double-click submit lock
+    await page.route('**/api/projects', async (route) => {
+      if (route.request().method() === 'POST') {
+        await new Promise((r) => setTimeout(r, 350));
+      }
+      await route.fallback();
+    });
+
     await expect(page.getByText(/Resumo do Projeto/i)).toBeVisible();
     await page.getByRole('button', { name: /Criar & Abrir no Studio GDD/i }).click();
+    await expect(page.getByRole('button', { name: /Criando e abrindo Studio GDD/i })).toBeDisabled();
+    await expect(page.getByRole('button', { name: /Voltar/i })).toBeDisabled();
     await page.waitForURL('**/projects/**');
 
     // Verify right Copilot drawer starts CLOSED by default
     await expect(page.getByRole('complementary', { name: 'Assistente Copiloto e Notas' })).toHaveCount(0);
 
-    // Wait for mocked multi-stage generation to finish
+    // During active Stage 1: verify Live Generation Panel, semantic progressbar, locked conflicting buttons & pending sections
+    await expect(page.getByRole('heading', { name: /Gerando seu Game Design Document/i })).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByRole('progressbar', { name: /Progresso da geração do GDD/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Auditar Qualidade' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Exportar' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Compartilhar' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Copiloto & Notas' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: /6\. Mecânicas de Gameplay/i })).toBeDisabled();
+
+    // Wait for Stage 1 (sections 1..4) to finish and unlock progressively while Stage 2 runs
+    await expect(page.getByRole('button', { name: /4\. Estilo Visual/i })).toBeEnabled({
+      timeout: 15_000,
+    });
+    await expect(page.getByRole('button', { name: /6\. Mecânicas de Gameplay/i })).toBeDisabled();
+
+    // Cancel generation mid-Stage 2 and verify Stage 1 preservation + Resume button
+    await page.getByRole('button', { name: /Cancelar e Manter Seções Concluídas/i }).click();
+    await expect(page.getByRole('button', { name: /Continuar Geração \(3 estágios\)/i })).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByRole('button', { name: /6\. Mecânicas de Gameplay/i })).toBeDisabled();
+
+    // Verify completed Stage 1 section 4 is immediately readable even after partial cancel
+    await page.getByRole('button', { name: /4\. Estilo Visual/i }).click();
+    await expect(page.getByText('#0EA5E9').first()).toBeVisible();
+
+    // Resume generation to complete remaining stages 2..4
+    await page.getByRole('button', { name: /Continuar Geração \(3 estágios\)/i }).click();
     await expect(page.getByText(/GDD completo gerado e auditado/i)).toBeVisible({ timeout: 20_000 });
     await expect(page.getByText(/Score: (9\d|100)%/i)).toBeVisible();
 
@@ -78,7 +135,8 @@ test.describe('AgentGDD Studio v2 End-to-End Tests', () => {
     await expect(page.getByRole('heading', { name: /Paleta HEX Visual/i })).toBeVisible();
     await expect(page.getByText('#0EA5E9').first()).toBeVisible();
 
-    // Check Section 6 Mermaid diagram rendering
+    // Check Section 6 Mermaid diagram rendering (now unlocked after resume)
+    await expect(page.getByRole('button', { name: /6\. Mecânicas de Gameplay/i })).toBeEnabled();
     await page.getByRole('button', { name: /6\. Mecânicas de Gameplay/i }).click();
     await expect(page.getByText(/Diagrama visual gerado pelo fluxo do GDD/i)).toBeVisible();
 

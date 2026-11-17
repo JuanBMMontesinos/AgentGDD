@@ -13,7 +13,8 @@ All protected endpoints require an authenticated Supabase session cookie (enforc
 | `GET` | `/api/projects/[id]` | Fetches project metadata, sections, structured entities, versions, latest audit, and comments. |
 | `PATCH` | `/api/projects/[id]` | Updates project metadata (`title`, `status`, `version_label`, `is_public`, `share_slug`, `concept_brief`). |
 | `DELETE` | `/api/projects/[id]` | Deletes a project and cascades child rows. |
-| `POST` | `/api/projects/[id]/generate` | Streams (SSE) multi-stage GDD generation using `@google/genai` (or deterministic mock when `E2E_MOCK_AI=1` in test mode), persisting sections and entities incrementally. |
+| `POST` | `/api/projects/[id]/generate` | Streams (SSE) multi-stage GDD generation using `@google/genai` (or deterministic mock when `E2E_MOCK_AI=1` in test mode), emitting `stage_start`, `stage_status`, `stage_heartbeat`, `text_delta`, `stage_saved`, `cancelled`, `error`, and `done`. Accepts `{ resumeOnlyMissing: true }` to skip already-completed stages. |
+| `POST` | `/api/projects/[id]/generate/cancel` | Marks active `queued`/`running` generation jobs as `cancelled`, preserves all completed sections, and returns the updated partial `overallScore`. |
 | `PATCH` | `/api/projects/[id]/sections/[sectionNumber]` | Updates a section's Markdown content or `review_status` and recalculates `word_count` and audit score. |
 | `POST` | `/api/projects/[id]/sections/[sectionNumber]/refine` | Refines or expands a single section via Gemini AI using cross-section context. |
 | `POST` | `/api/projects/[id]/entities` | Adds or replaces structured entities (`enemy`, `boss`, `equipment`, `skill`, `color_swatch`, `roadmap_phase`, `risk_item`, `asset_estimate`). |

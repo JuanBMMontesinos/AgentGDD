@@ -39,6 +39,27 @@ export function getGenerationStages(includeMultiplayer: boolean): GenerationStag
 }
 
 /**
+ * Filters generation stages to only those with at least one unfilled section.
+ */
+export function getPendingStages(
+  stages: GenerationStageSpec[],
+  filledSectionNumbers: Iterable<number>
+): GenerationStageSpec[] {
+  const filled = new Set(filledSectionNumbers);
+  return stages.filter((stage) => stage.sectionNumbers.some((num) => !filled.has(num)));
+}
+
+/**
+ * Finds the stage number responsible for generating a given section number.
+ */
+export function getStageForSection(
+  stages: GenerationStageSpec[],
+  sectionNumber: number
+): GenerationStageSpec | undefined {
+  return stages.find((s) => s.sectionNumbers.includes(sectionNumber));
+}
+
+/**
  * Builds the master system instruction derived directly from Prompt-Agente-GDD-IA
  * and expanded with Studio-grade engineering modules.
  */

@@ -4,7 +4,7 @@ import {
   shouldUseMockAi,
   type GeminiModelName,
 } from '@/lib/ai/gemini';
-import { getGenerationStages } from '@/lib/gdd/prompt-builder';
+import { getGenerationStages, getPendingStages } from '@/lib/gdd/prompt-builder';
 import {
   persistStageOutput,
   requireAuthenticatedContext,
@@ -16,12 +16,13 @@ const GenerateRequestSchema = z
   .object({
     model: z.enum(['gemini-3.8-flash', 'gemini-4-argon', 'gemini-3.5-flash-lite']).optional(),
     apiKey: z.string().optional(),
+    resumeOnlyMissing: z.boolean().optional(),
   })
   .optional();
 
 /**
- * Streams multi-stage GDD generation over Server-Sent Events (SSE), persisting
- * each stage to `gdd_sections`, extracting structured entities, and auditing quality.
+ * Streams multi-stage GDD generation over SSE with real-time stage status, heartbeats,
+ * incremental Supabase persistence, partial resume support, and safe abort cancellation.
  */
 export async function POST(
   request: Request,
@@ -59,8 +60,34 @@ export async function POST(
   const brief = (project.concept_brief ?? {}) as ConceptBrief;
   const language = (project.language ?? 'pt-BR') as GddLanguage;
   const depthMode = (project.depth_mode ?? 'full') as GddDepthMode;
-  const stages = getGenerationStages(Boolean(brief.multiplayer));
+  const allStages = getGenerationStages(Boolean(brief.multiplayer));
+
+  const { data: existingSections } = await supabase
+    .from('gdd_sections')
+    .select('section_number, title, content_markdown, word_count')
+    .eq('project_id', id)
+    .order('section_number', { ascending: true });
+
+  const filledNums = (existingSections ?? [])
+    .filter((s) => (s.word_count ?? 0) > 0)
+    .map((s) => s.section_number as number);
+
+  const stagesToRun = parsed.data?.resumeOnlyMissing
+    ? getPendingStages(allStages, filledNums)
+    : allStages;
+
+  if (stagesToRun.length === 0) {
+    return new Response(JSON.stringify({ error: 'Todas as seções já estão preenchidas.' }), {
+      status: 400,
+    });
+  }
+
   const useMock = shouldUseMockAi(request.headers);
+  const rawMockDelay = Number.parseInt(request.headers.get('x-mock-stage-delay-ms') || '0', 10);
+  const mockDelayMs =
+    useMock && Number.isFinite(rawMockDelay) && rawMockDelay > 0
+      ? Math.min(rawMockDelay, 5000)
+      : 0;
   const selectedModel: GeminiModelName = parsed.data?.model ?? 'gemini-3.8-flash';
   const overrideApiKey = parsed.data?.apiKey || request.headers.get('x-gemini-api-key');
 
@@ -70,29 +97,74 @@ export async function POST(
       project_id: id,
       status: 'running',
       current_step: 0,
-      total_steps: stages.length + 1,
+      total_steps: stagesToRun.length + 1,
       step_label: 'Iniciando orquestração...',
       model_used: selectedModel,
     })
     .select('id')
     .single();
 
+  const abortController = new AbortController();
+  const handleRequestAbort = () => abortController.abort();
+  request.signal.addEventListener('abort', handleRequestAbort);
+
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
     async start(controller) {
+      let streamClosed = false;
       const sendEvent = (event: string, payload: unknown) => {
-        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`));
+        if (streamClosed || abortController.signal.aborted) return;
+        try {
+          controller.enqueue(
+            encoder.encode(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
+          );
+        } catch {
+          streamClosed = true;
+        }
+      };
+
+      const closeStream = () => {
+        if (streamClosed) return;
+        streamClosed = true;
+        try {
+          controller.close();
+        } catch {
+          // Ignore already closed stream
+        }
+      };
+
+      const checkDbCancelled = async () => {
+        if (!job?.id) return false;
+        const { data } = await supabase
+          .from('gdd_generation_jobs')
+          .select('status')
+          .eq('id', job.id)
+          .maybeSingle();
+        return data?.status === 'cancelled';
       };
 
       try {
-        let priorSummary = '';
+        let priorSummary = parsed.data?.resumeOnlyMissing
+          ? (existingSections ?? [])
+              .filter((s) => (s.word_count ?? 0) > 0)
+              .map((s) => `## ${s.title}\n${String(s.content_markdown).slice(0, 400)}`)
+              .join('\n\n')
+          : '';
         let previousInteractionId: string | undefined;
 
-        for (const stage of stages) {
+        for (let idx = 0; idx < stagesToRun.length; idx += 1) {
+          const stage = stagesToRun[idx];
+
+          if (abortController.signal.aborted || (await checkDbCancelled())) {
+            abortController.abort();
+            throw new DOMException('Geração cancelada pelo usuário.', 'AbortError');
+          }
+
           sendEvent('stage_start', {
             stageNumber: stage.stageNumber,
-            totalStages: stages.length,
+            stepIndex: idx + 1,
+            totalStages: stagesToRun.length,
             label: stage.label,
             sectionNumbers: stage.sectionNumbers,
           });
@@ -101,26 +173,52 @@ export async function POST(
             await supabase
               .from('gdd_generation_jobs')
               .update({
-                current_step: stage.stageNumber,
+                current_step: idx + 1,
                 step_label: stage.label,
               })
               .eq('id', job.id);
           }
 
-          const result = await generateGddStageStream({
-            brief,
-            language,
-            depthMode,
-            stage,
-            priorSummary,
-            previousInteractionId,
-            model: selectedModel,
-            overrideApiKey,
-            useMock,
-            onTextDelta: (chunk) => {
-              sendEvent('text_delta', { stageNumber: stage.stageNumber, chunk });
-            },
-          });
+          const stageStartedAt = Date.now();
+          const heartbeat = setInterval(() => {
+            sendEvent('stage_heartbeat', {
+              stageNumber: stage.stageNumber,
+              elapsedMs: Date.now() - stageStartedAt,
+            });
+          }, 2500);
+
+          let result: { text: string; interactionId?: string };
+          try {
+            result = await generateGddStageStream({
+              brief,
+              language,
+              depthMode,
+              stage,
+              priorSummary,
+              previousInteractionId,
+              model: selectedModel,
+              overrideApiKey,
+              useMock,
+              mockDelayMs,
+              abortSignal: abortController.signal,
+              onStatus: (statusText) => {
+                sendEvent('stage_status', {
+                  stageNumber: stage.stageNumber,
+                  statusText,
+                });
+              },
+              onTextDelta: (chunk) => {
+                sendEvent('text_delta', { stageNumber: stage.stageNumber, chunk });
+              },
+            });
+          } finally {
+            clearInterval(heartbeat);
+          }
+
+          if (abortController.signal.aborted || (await checkDbCancelled())) {
+            abortController.abort();
+            throw new DOMException('Geração cancelada pelo usuário.', 'AbortError');
+          }
 
           if (result.interactionId) {
             previousInteractionId = result.interactionId;
@@ -146,7 +244,6 @@ export async function POST(
           brief,
         });
 
-        // Create initial version snapshot if none exists yet
         const { count: versionCount } = await supabase
           .from('gdd_versions')
           .select('*', { count: 'exact', head: true })
@@ -184,7 +281,7 @@ export async function POST(
             .from('gdd_generation_jobs')
             .update({
               status: 'completed',
-              current_step: stages.length + 1,
+              current_step: stagesToRun.length + 1,
               step_label: 'Concluído e auditado',
               last_interaction_id: previousInteractionId ?? null,
             })
@@ -196,8 +293,34 @@ export async function POST(
           extractedEntities: extractedCount,
         });
         sendEvent('done', { projectId: id, overallScore: audit.overallScore });
-        controller.close();
+        closeStream();
       } catch (err) {
+        const isAbort =
+          abortController.signal.aborted ||
+          (err instanceof Error && err.name === 'AbortError');
+
+        if (isAbort) {
+          const { audit } = await resyncEntitiesAndAudit({
+            supabase,
+            projectId: id,
+            brief,
+          });
+
+          if (job?.id) {
+            await supabase
+              .from('gdd_generation_jobs')
+              .update({
+                status: 'cancelled',
+                step_label: 'Cancelado pelo usuário (progresso parcial mantido)',
+              })
+              .eq('id', job.id);
+          }
+
+          sendEvent('cancelled', { overallScore: audit.overallScore });
+          closeStream();
+          return;
+        }
+
         const message = err instanceof Error ? err.message : 'Erro desconhecido na geração.';
         if (job?.id) {
           await supabase
@@ -206,7 +329,9 @@ export async function POST(
             .eq('id', job.id);
         }
         sendEvent('error', { message });
-        controller.close();
+        closeStream();
+      } finally {
+        request.signal.removeEventListener('abort', handleRequestAbort);
       }
     },
   });

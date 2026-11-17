@@ -13,9 +13,10 @@ Este guia explica **como operar o AgentGDD passo a passo** e **o que deve conter
    - *Passo 2 — Arquitetura & Escopo*: defina Engine, Câmera, Plataformas e Equipe com **Detector de Conflitos Técnicos** em tempo real.
    - *Passo 3 — Formato & Geração*: escolha Modo (`Bíblia Completa` vs `MVP Enxuto`), Idioma e Multiplayer.
 4. **Studio 3 Colunas (`/projects/[id]`):**
-   - *Esquerda*: Navegador agrupado por disciplinas (Blocos A–D) com indicadores de status (`vazio`, `rascunho`, `aprovado`) e Ferramentas Globais (*Tabelas*, *Moodboard*, *Auditoria*, *Versões*).
+   - *Esquerda*: Navegador agrupado por disciplinas (Blocos A–D) com indicadores de status (`vazio`, `rascunho`, `aprovado`) e **liberação progressiva**: durante a geração por IA, apenas seções já concluídas ficam desbloqueadas para leitura (as demais permanecem travadas com cadeado para evitar edições conflitantes; fora da geração, o botão **Editar vazias** permite escrita manual opt-in). Inclui Ferramentas Globais (*Tabelas*, *Moodboard*, *Auditoria*, *Versões*).
+   - *Painel de Geração Ao Vivo & Cancelamento*: Enquanto a IA trabalha, o centro exibe progresso percentual, tempo decorrido, checklist dos 4 estágios, preview em streaming e o botão **Cancelar e Manter Seções Concluídas**. Se cancelar no meio, tudo o que já foi salvo permanece intacto e você pode clicar em **Continuar Geração** para retomar apenas os estágios faltantes.
    - *Centro*: Dica contextual da seção + leitura formatada (Markdown + Mermaid + Paleta HEX) e edição.
-   - *Direita (Retrátil)*: Copiloto de Refinamento IA e Notas da equipe.
+   - *Direita (Retrátil)*: Copiloto de Refinamento IA e Notas da equipe (fechado por padrão para focar na leitura).
 5. **Versionamento & Exportação:** Salve snapshots (`v1.0`, `v1.1`), gere link público (`/share/...`) ou exporte em `.MD`, `.JSON`, `.CSV Backlog` e `PDF / Imprimir`.
 
 ---

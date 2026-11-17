@@ -4,6 +4,8 @@ import {
   buildSectionRefinePrompt,
   buildStagePrompt,
   getGenerationStages,
+  getPendingStages,
+  getStageForSection,
 } from '../../src/lib/gdd/prompt-builder';
 
 test.describe('Prompt Builder Unit Tests', () => {
@@ -55,5 +57,30 @@ test.describe('Prompt Builder Unit Tests', () => {
 
     expect(refinePrompt).toContain('Godot 4.3+');
     expect(refinePrompt).toContain('Adicione sistema de sinergia elemental.');
+  });
+
+  test('filters pending stages when resuming partial generation', () => {
+    const stages = getGenerationStages(true);
+
+    expect(getPendingStages(stages, []).map((s) => s.stageNumber)).toEqual([1, 2, 3, 4]);
+    expect(getPendingStages(stages, [1, 2, 3, 4]).map((s) => s.stageNumber)).toEqual([2, 3, 4]);
+    // Partially filled stage 2 (only section 5 filled, 6 missing) keeps stage 2 pending
+    expect(getPendingStages(stages, [1, 2, 3, 4, 5]).map((s) => s.stageNumber)).toEqual([2, 3, 4]);
+    // All sections completed -> no pending stages
+    expect(
+      getPendingStages(stages, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+    ).toEqual([]);
+  });
+
+  test('maps any section number to its owning generation stage', () => {
+    const stagesWithMp = getGenerationStages(true);
+    const stagesWithoutMp = getGenerationStages(false);
+
+    expect(getStageForSection(stagesWithMp, 4)?.stageNumber).toBe(1);
+    expect(getStageForSection(stagesWithMp, 6)?.stageNumber).toBe(2);
+    expect(getStageForSection(stagesWithMp, 9)?.stageNumber).toBe(3);
+    expect(getStageForSection(stagesWithMp, 13)?.stageNumber).toBe(4);
+    expect(getStageForSection(stagesWithoutMp, 13)).toBeUndefined();
+    expect(getStageForSection(stagesWithoutMp, 15)?.stageNumber).toBe(4);
   });
 });

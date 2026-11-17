@@ -32,20 +32,28 @@ export function isTransientGeminiError(error: unknown): boolean {
 export async function withModelFallback<T>(
   primaryModel: GeminiModelName,
   executor: (model: GeminiModelName) => Promise<T>,
-  delayMs = 800
+  delayMs = 800,
+  options?: {
+    abortSignal?: AbortSignal;
+    onFallback?: (fromModel: GeminiModelName, toModel: GeminiModelName) => void;
+  }
 ): Promise<T> {
   const chain = FALLBACK_CHAIN[primaryModel] ?? [primaryModel];
   let lastError: unknown;
 
   for (let i = 0; i < chain.length; i += 1) {
+    if (options?.abortSignal?.aborted) {
+      throw new DOMException('Geração cancelada pelo usuário.', 'AbortError');
+    }
     const model = chain[i];
     try {
       return await executor(model);
     } catch (err) {
       lastError = err;
-      if (!isTransientGeminiError(err) || i === chain.length - 1) {
+      if (options?.abortSignal?.aborted || !isTransientGeminiError(err) || i === chain.length - 1) {
         throw err;
       }
+      options?.onFallback?.(model, chain[i + 1]);
       if (delayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
@@ -93,9 +101,30 @@ export async function generateGddStageStream(params: {
   model?: GeminiModelName;
   overrideApiKey?: string | null;
   useMock?: boolean;
+  mockDelayMs?: number;
+  abortSignal?: AbortSignal;
+  onStatus?: (statusText: string) => void;
   onTextDelta?: (chunk: string) => void;
 }): Promise<{ text: string; interactionId?: string }> {
+  if (params.abortSignal?.aborted) {
+    throw new DOMException('Geração cancelada pelo usuário.', 'AbortError');
+  }
+
   if (params.useMock) {
+    params.onStatus?.(`Gerando ${params.stage.label}...`);
+    if (params.mockDelayMs && params.mockDelayMs > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, params.mockDelayMs);
+        params.abortSignal?.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            reject(new DOMException('Geração cancelada pelo usuário.', 'AbortError'));
+          },
+          { once: true }
+        );
+      });
+    }
     const fullText = generateMockStageMarkdown(params.brief, params.stage.stageNumber);
     params.onTextDelta?.(fullText);
     return { text: fullText, interactionId: `mock-interaction-${params.stage.stageNumber}` };
@@ -113,36 +142,57 @@ export async function generateGddStageStream(params: {
     priorSummary: params.priorSummary,
   });
 
-  return withModelFallback(primaryModel, async (model) => {
-    const stream = await ai.interactions.create({
-      model,
-      input,
-      system_instruction: systemInstruction,
-      ...(params.previousInteractionId && model === primaryModel
-        ? { previous_interaction_id: params.previousInteractionId }
-        : {}),
-      stream: true,
-    });
+  return withModelFallback(
+    primaryModel,
+    async (model) => {
+      params.onStatus?.(`Conectando ao modelo ${model}...`);
+      const stream = await ai.interactions.create({
+        model,
+        input,
+        system_instruction: systemInstruction,
+        ...(params.previousInteractionId && model === primaryModel
+          ? { previous_interaction_id: params.previousInteractionId }
+          : {}),
+        stream: true,
+      });
 
-    let accumulated = '';
-    let interactionId: string | undefined;
+      let accumulated = '';
+      let interactionId: string | undefined;
 
-    for await (const event of stream) {
-      if (event.event_type === 'interaction.created' && event.interaction?.id) {
-        interactionId = event.interaction.id;
-      } else if (event.event_type === 'step.delta' && event.delta?.type === 'text') {
-        const piece = event.delta.text ?? '';
-        if (piece) {
-          accumulated += piece;
-          params.onTextDelta?.(piece);
+      for await (const event of stream) {
+        if (params.abortSignal?.aborted) {
+          throw new DOMException('Geração cancelada pelo usuário.', 'AbortError');
         }
-      } else if (event.event_type === 'interaction.completed' && event.interaction?.id) {
-        interactionId = event.interaction.id;
+        if (event.event_type === 'interaction.created' && event.interaction?.id) {
+          interactionId = event.interaction.id;
+        } else if (event.event_type === 'step.start') {
+          const stepType = (event as { step?: { type?: string } }).step?.type;
+          if (stepType === 'thought') {
+            params.onStatus?.(`IA (${model}) planejando estrutura e coerência...`);
+          } else {
+            params.onStatus?.(`IA (${model}) escrevendo seções...`);
+          }
+        } else if (event.event_type === 'step.delta' && event.delta?.type === 'text') {
+          const piece = event.delta.text ?? '';
+          if (piece) {
+            accumulated += piece;
+            params.onTextDelta?.(piece);
+          }
+        } else if (event.event_type === 'interaction.completed' && event.interaction?.id) {
+          interactionId = event.interaction.id;
+        }
       }
-    }
 
-    return { text: accumulated, interactionId };
-  });
+      return { text: accumulated, interactionId };
+    },
+    800,
+    {
+      abortSignal: params.abortSignal,
+      onFallback: (fromModel, toModel) => {
+        params.onStatus?.(`${fromModel} sobrecarregado; alternando para ${toModel}...`);
+      },
+    }
+  );
 }
 
 /**

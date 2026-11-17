@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
+  Loader2,
   Sparkles,
   Wand2,
 } from 'lucide-react';
@@ -67,6 +68,12 @@ export function NewGddWizard({ templates, initialTemplateSlug }: NewGddWizardPro
   useEffect(() => {
     setHydrated(true);
   }, []);
+
+  useEffect(() => {
+    if (step === 3) {
+      router.prefetch('/projects/00000000-0000-0000-0000-000000000000');
+    }
+  }, [router, step]);
 
   function applyTemplate(tpl: GddTemplateRecord) {
     setSelectedTemplateId(tpl.id);
@@ -162,6 +169,7 @@ export function NewGddWizard({ templates, initialTemplateSlug }: NewGddWizardPro
       return;
     }
 
+    if (submitting) return;
     setSubmitting(true);
     try {
       const res = await fetch('/api/projects', {
@@ -180,17 +188,17 @@ export function NewGddWizard({ templates, initialTemplateSlug }: NewGddWizardPro
       const data = await res.json();
       if (!res.ok) {
         setErrorMsg(data.error || 'Não foi possível criar o projeto.');
+        setSubmitting(false);
         return;
       }
 
       const targetUrl = autoGenerate
         ? `/projects/${data.project.id}?autogen=1`
         : `/projects/${data.project.id}`;
-      router.push(targetUrl);
-      router.refresh();
+      // Keep submitting=true until navigation unmounts this page to prevent double clicks.
+      router.replace(targetUrl);
     } catch {
       setErrorMsg('Falha de rede ao criar o projeto.');
-    } finally {
       setSubmitting(false);
     }
   }
@@ -639,8 +647,9 @@ export function NewGddWizard({ templates, initialTemplateSlug }: NewGddWizardPro
             <div className="flex flex-wrap items-center justify-between gap-3">
               <button
                 type="button"
+                disabled={submitting}
                 onClick={() => setStep(2)}
-                className="inline-flex min-h-10 items-center gap-1.5 rounded-xl border px-4 py-2 text-xs font-semibold"
+                className="inline-flex min-h-10 items-center gap-1.5 rounded-xl border px-4 py-2 text-xs font-semibold disabled:opacity-50"
                 style={{ borderColor: 'var(--border-subtle)' }}
               >
                 <ArrowLeft className="h-4 w-4" aria-hidden="true" />
@@ -650,14 +659,22 @@ export function NewGddWizard({ templates, initialTemplateSlug }: NewGddWizardPro
               <button
                 type="submit"
                 disabled={submitting}
-                className="inline-flex min-h-11 items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-bold shadow-sm transition hover:opacity-90 disabled:opacity-60"
+                className="inline-flex min-h-11 items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-bold shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-70"
                 style={{
                   backgroundColor: 'var(--brand)',
                   color: 'var(--brand-contrast)',
                 }}
               >
-                <Sparkles className="h-4 w-4" aria-hidden="true" />
-                <span>{submitting ? 'Criando Projeto...' : 'Criar & Abrir no Studio GDD'}</span>
+                {submitting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Sparkles className="h-4 w-4" aria-hidden="true" />
+                )}
+                <span>
+                  {submitting
+                    ? 'Criando e abrindo Studio GDD...'
+                    : 'Criar & Abrir no Studio GDD'}
+                </span>
               </button>
             </div>
           </div>

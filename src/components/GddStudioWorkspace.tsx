@@ -5,7 +5,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Circle,
   CircleDot,
   ClipboardCheck,
   Download,
@@ -15,14 +14,19 @@ import {
   History,
   Image as ImageIcon,
   Layers,
+  Loader2,
+  Lock,
   MessageSquare,
   PanelRightClose,
   PanelRightOpen,
+  Play,
   Printer,
   RotateCcw,
   Save,
   Share2,
   Sparkles,
+  Square,
+  Unlock,
   Wand2,
   X,
 } from 'lucide-react';
@@ -32,6 +36,7 @@ import { AuditChecklistDialog } from '@/components/AuditChecklistDialog';
 import { ColorPalettePanel } from '@/components/ColorPalettePanel';
 import { EntityTableEditor } from '@/components/EntityTableEditor';
 import { MarkdownRenderer } from '@/components/MarkdownRenderer';
+import { getGenerationStages, getPendingStages } from '@/lib/gdd/prompt-builder';
 import { getSectionDefinitionByNumber, getSectionGroups } from '@/lib/gdd/sections';
 import type {
   GddProjectDetail,
@@ -46,14 +51,13 @@ interface GddStudioWorkspaceProps {
   readOnly?: boolean;
 }
 
-type CenterView = 'section' | 'entities' | 'moodboard' | 'versions';
+type CenterView = 'section' | 'generating' | 'entities' | 'moodboard' | 'versions';
 type SectionMode = 'read' | 'edit';
 type AssistantTab = 'copilot' | 'comments';
 
 /**
- * Redesigned 3-zone GDD Studio workspace featuring discipline-grouped navigation,
- * uncluttered top toolbar with Export/Share disclosures, contextual per-section help,
- * and a right-hand Copilot & Notes drawer closed by default to maximize reading space.
+ * 3-zone GDD Studio Workspace with live multi-stage generation panel, progressive
+ * section unlocking, conflict-prevention locks, and safe generation cancellation.
  */
 export function GddStudioWorkspace({
   initialDetail,
@@ -62,13 +66,18 @@ export function GddStudioWorkspace({
 }: GddStudioWorkspaceProps) {
   const [detail, setDetail] = useState<GddProjectDetail>(initialDetail);
   const [activeSectionNumber, setActiveSectionNumber] = useState<number>(
-    initialDetail.sections[0]?.section_number ?? 1
+    initialDetail.sections.find((s) => s.word_count > 0)?.section_number ??
+      initialDetail.sections[0]?.section_number ??
+      1
   );
-  const [centerView, setCenterView] = useState<CenterView>('section');
+  const [centerView, setCenterView] = useState<CenterView>(
+    autoGenerateOnMount ? 'generating' : 'section'
+  );
   const [sectionMode, setSectionMode] = useState<SectionMode>('read');
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantTab, setAssistantTab] = useState<AssistantTab>('copilot');
   const [sectionTipOpen, setSectionTipOpen] = useState(true);
+  const [manualUnlockAll, setManualUnlockAll] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<GddSectionGroupId, boolean>>({
     A: false,
     B: false,
@@ -87,9 +96,17 @@ export function GddStudioWorkspace({
   const [newComment, setNewComment] = useState('');
   const [snapshotNote, setSnapshotNote] = useState('');
   const [snapshotVersion, setSnapshotVersion] = useState('v1.1');
+
+  // Generation & cancellation state
   const [isGenerating, setIsGenerating] = useState(false);
-  const [genProgressText, setGenProgressText] = useState<string | null>(null);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [activeStageNum, setActiveStageNum] = useState<number | null>(null);
+  const [completedStageNums, setCompletedStageNums] = useState<number[]>([]);
+  const [totalRunStages, setTotalRunStages] = useState<number>(4);
+  const [liveStatusText, setLiveStatusText] = useState<string>('Aguardando início...');
   const [streamPreview, setStreamPreview] = useState<string>('');
+  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
+
   const [isSaving, setIsSaving] = useState(false);
   const [isRefining, setIsRefining] = useState(false);
   const [isAuditing, setIsAuditing] = useState(false);
@@ -101,7 +118,28 @@ export function GddStudioWorkspace({
   );
 
   const autoTriggeredRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
+
+  const allStages = useMemo(
+    () => getGenerationStages(Boolean(detail.project.concept_brief?.multiplayer)),
+    [detail.project.concept_brief?.multiplayer]
+  );
+
+  const filledSectionNumbers = useMemo(
+    () => detail.sections.filter((s) => s.word_count > 0).map((s) => s.section_number),
+    [detail.sections]
+  );
+
+  const pendingStages = useMemo(
+    () => getPendingStages(allStages, filledSectionNumbers),
+    [allStages, filledSectionNumbers]
+  );
+
+  const activeStageSpec = useMemo(
+    () => allStages.find((s) => s.stageNumber === activeStageNum),
+    [allStages, activeStageNum]
+  );
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -126,6 +164,16 @@ export function GddStudioWorkspace({
     };
   }, []);
 
+  useEffect(() => {
+    if (!isGenerating) return;
+    const startedAt = Date.now();
+    setElapsedSeconds(0);
+    const interval = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isGenerating]);
+
   const activeSection: GddSectionRecord | undefined = useMemo(
     () => detail.sections.find((s) => s.section_number === activeSectionNumber),
     [detail.sections, activeSectionNumber]
@@ -149,10 +197,27 @@ export function GddStudioWorkspace({
       .filter((g) => g.items.length > 0);
   }, [detail.project.language, detail.sections]);
 
-  const totalFilledSections = useMemo(
-    () => detail.sections.filter((s) => s.word_count > 0).length,
-    [detail.sections]
-  );
+  const totalFilledSections = filledSectionNumbers.length;
+  const hasPartialProgress =
+    totalFilledSections > 0 && totalFilledSections < detail.sections.length;
+
+  const progressPercent = useMemo(() => {
+    if (!isGenerating) {
+      return detail.sections.length > 0
+        ? Math.round((totalFilledSections / detail.sections.length) * 100)
+        : 0;
+    }
+    if (totalRunStages === 0) return 0;
+    const base = Math.round((completedStageNums.length / totalRunStages) * 100);
+    return Math.min(96, Math.max(base, activeStageNum ? 8 : 4));
+  }, [
+    isGenerating,
+    totalFilledSections,
+    detail.sections.length,
+    completedStageNums.length,
+    totalRunStages,
+    activeStageNum,
+  ]);
 
   const section4Markdown = useMemo(
     () => detail.sections.find((s) => s.section_number === 4)?.content_markdown ?? '',
@@ -164,7 +229,7 @@ export function GddStudioWorkspace({
     [detail.comments, activeSectionNumber]
   );
 
-  const refreshProject = useCallback(async () => {
+  const refreshProject = useCallback(async (): Promise<GddProjectDetail | null> => {
     const res = await fetch(`/api/projects/${detail.project.id}`);
     if (res.ok) {
       const updated = (await res.json()) as GddProjectDetail;
@@ -173,12 +238,15 @@ export function GddStudioWorkspace({
       if (current) {
         setEditorText(current.content_markdown);
       }
+      return updated;
     }
+    return null;
   }, [detail.project.id, activeSectionNumber]);
 
   function handleSelectSection(sec: GddSectionRecord) {
     setActiveSectionNumber(sec.section_number);
     setEditorText(sec.content_markdown);
+    setSectionMode('read');
     setCenterView('section');
   }
 
@@ -186,85 +254,167 @@ export function GddStudioWorkspace({
     setCollapsedGroups((prev) => ({ ...prev, [groupId]: !prev[groupId] }));
   }
 
-  const handleGenerateFullGdd = useCallback(async () => {
-    if (isGenerating || readOnly) return;
-    setGenerateMenuOpen(false);
-    setIsGenerating(true);
-    setStreamPreview('');
-    setGenProgressText('Conectando à orquestração Gemini AI...');
-    setStatusBanner(null);
+  const handleStartGeneration = useCallback(
+    async (options?: { resumeOnlyMissing?: boolean }) => {
+      if (isGenerating || readOnly) return;
 
-    try {
-      const res = await fetch(`/api/projects/${detail.project.id}/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: selectedModel }),
-      });
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
 
-      if (!res.ok) {
-        const errPayload = await res.json().catch(() => ({ error: 'Falha ao iniciar geração.' }));
-        throw new Error(errPayload.error || `Erro HTTP ${res.status}`);
-      }
+      setGenerateMenuOpen(false);
+      setExportOpen(false);
+      setShareOpen(false);
+      setAssistantOpen(false);
+      setCenterView('generating');
+      setIsGenerating(true);
+      setIsCancelling(false);
+      setStreamPreview('');
+      setActiveStageNum(null);
+      setCompletedStageNums([]);
+      setTotalRunStages(
+        options?.resumeOnlyMissing ? Math.max(1, pendingStages.length) : allStages.length
+      );
+      setLiveStatusText('Conectando à orquestração Gemini AI...');
+      setStatusBanner(null);
 
-      if (!res.body) {
-        throw new Error('Resposta sem stream.');
-      }
+      try {
+        const res = await fetch(`/api/projects/${detail.project.id}/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            model: selectedModel,
+            resumeOnlyMissing: Boolean(options?.resumeOnlyMissing),
+          }),
+        });
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({ error: 'Falha ao iniciar geração.' }));
+          throw new Error(errPayload.error || `Erro HTTP ${res.status}`);
+        }
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+        if (!res.body) {
+          throw new Error('Resposta sem stream.');
+        }
 
-        const frames = buffer.split('\n\n');
-        buffer = frames.pop() ?? '';
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-        for (const frame of frames) {
-          const eventMatch = frame.match(/^event:\s*(.+)$/m);
-          const dataMatch = frame.match(/^data:\s*(.+)$/m);
-          if (!eventMatch || !dataMatch) continue;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
 
-          const eventName = eventMatch[1].trim();
-          const payload = JSON.parse(dataMatch[1]);
+          const frames = buffer.split('\n\n');
+          buffer = frames.pop() ?? '';
 
-          if (eventName === 'stage_start') {
-            setGenProgressText(
-              `Estágio ${payload.stageNumber}/${payload.totalStages}: ${payload.label}`
-            );
-          } else if (eventName === 'text_delta') {
-            setStreamPreview((prev) => `${prev}${payload.chunk}`.slice(-1800));
-          } else if (eventName === 'stage_saved') {
-            await refreshProject();
-          } else if (eventName === 'error') {
-            setStatusBanner(`Erro na geração: ${payload.message}`);
-          } else if (eventName === 'done') {
-            await refreshProject();
-            setGenProgressText(null);
-            setStatusBanner(
-              `GDD completo gerado e auditado! Score de Qualidade: ${payload.overallScore}%`
-            );
+          for (const frame of frames) {
+            const eventMatch = frame.match(/^event:\s*(.+)$/m);
+            const dataMatch = frame.match(/^data:\s*(.+)$/m);
+            if (!eventMatch || !dataMatch) continue;
+
+            const eventName = eventMatch[1].trim();
+            const payload = JSON.parse(dataMatch[1]);
+
+            if (eventName === 'stage_start') {
+              setActiveStageNum(payload.stageNumber);
+              setTotalRunStages(payload.totalStages ?? allStages.length);
+              setLiveStatusText(`Estágio ${payload.stepIndex}/${payload.totalStages}: ${payload.label}`);
+            } else if (eventName === 'stage_status') {
+              setLiveStatusText(payload.statusText);
+            } else if (eventName === 'text_delta') {
+              setStreamPreview((prev) => `${prev}${payload.chunk}`.slice(-2200));
+            } else if (eventName === 'stage_saved') {
+              setCompletedStageNums((prev) =>
+                prev.includes(payload.stageNumber) ? prev : [...prev, payload.stageNumber]
+              );
+              await refreshProject();
+            } else if (eventName === 'cancelled') {
+              await refreshProject();
+              setStatusBanner(
+                `Geração cancelada. As seções já concluídas foram preservadas (Score parcial: ${payload.overallScore}%).`
+              );
+              setCenterView('section');
+            } else if (eventName === 'error') {
+              setStatusBanner(`Erro na geração: ${payload.message}`);
+            } else if (eventName === 'done') {
+              const latest = await refreshProject();
+              const firstFilled =
+                latest?.sections.find((s) => s.word_count > 0)?.section_number ?? 1;
+              setActiveSectionNumber(firstFilled);
+              setCenterView('section');
+              setStatusBanner(
+                `GDD completo gerado e auditado! Score de Qualidade: ${payload.overallScore}%`
+              );
+            }
           }
         }
+      } catch (err) {
+        if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+          const updated = await refreshProject();
+          const firstFilled = updated?.sections.find((s) => s.word_count > 0)?.section_number;
+          if (firstFilled) setActiveSectionNumber(firstFilled);
+          setCenterView('section');
+          setStatusBanner(
+            'Geração cancelada pelo usuário. Todas as seções já concluídas foram mantidas.'
+          );
+        } else {
+          setStatusBanner(err instanceof Error ? err.message : 'Erro ao gerar GDD.');
+          setCenterView('section');
+        }
+      } finally {
+        abortControllerRef.current = null;
+        setIsGenerating(false);
+        setIsCancelling(false);
+        setActiveStageNum(null);
       }
-    } catch (err) {
-      setStatusBanner(err instanceof Error ? err.message : 'Erro ao gerar GDD.');
+    },
+    [
+      allStages.length,
+      detail.project.id,
+      isGenerating,
+      pendingStages.length,
+      readOnly,
+      refreshProject,
+      selectedModel,
+    ]
+  );
+
+  async function handleCancelGeneration() {
+    if (!isGenerating || isCancelling) return;
+    setIsCancelling(true);
+    setLiveStatusText('Cancelando geração e preservando seções concluídas...');
+
+    abortControllerRef.current?.abort();
+    try {
+      await fetch(`/api/projects/${detail.project.id}/generate/cancel`, {
+        method: 'POST',
+      });
+    } catch {
+      // Abort already closed client stream; refresh handles persisted state
     } finally {
+      const updated = await refreshProject();
+      const firstFilled = updated?.sections.find((s) => s.word_count > 0)?.section_number;
+      if (firstFilled) setActiveSectionNumber(firstFilled);
       setIsGenerating(false);
+      setIsCancelling(false);
+      setCenterView('section');
+      setStatusBanner(
+        'Geração cancelada. As seções já concluídas foram preservadas no banco de dados.'
+      );
     }
-  }, [detail.project.id, isGenerating, readOnly, refreshProject, selectedModel]);
+  }
 
   useEffect(() => {
     if (autoGenerateOnMount && !autoTriggeredRef.current && !readOnly) {
       autoTriggeredRef.current = true;
-      void handleGenerateFullGdd();
+      void handleStartGeneration({ resumeOnlyMissing: false });
     }
-  }, [autoGenerateOnMount, handleGenerateFullGdd, readOnly]);
+  }, [autoGenerateOnMount, handleStartGeneration, readOnly]);
 
   async function handleSaveSection(newStatus?: GddReviewStatus) {
-    if (!activeSection || readOnly) return;
+    if (!activeSection || readOnly || isGenerating) return;
     setIsSaving(true);
     try {
       const res = await fetch(
@@ -290,7 +440,7 @@ export function GddStudioWorkspace({
 
   async function handleRefineSection(instructionOverride?: string) {
     const promptText = instructionOverride ?? refineInstruction;
-    if (!activeSection || !promptText.trim() || readOnly) return;
+    if (!activeSection || !promptText.trim() || readOnly || isGenerating) return;
 
     setIsRefining(true);
     try {
@@ -320,7 +470,7 @@ export function GddStudioWorkspace({
   }
 
   async function handleRunAudit() {
-    if (isAuditing) return;
+    if (isAuditing || isGenerating) return;
     setIsAuditing(true);
     setStatusBanner(null);
     try {
@@ -350,7 +500,7 @@ export function GddStudioWorkspace({
 
   async function handleCreateSnapshot(e: React.FormEvent) {
     e.preventDefault();
-    if (!snapshotVersion.trim() || readOnly) return;
+    if (!snapshotVersion.trim() || readOnly || isGenerating) return;
     const res = await fetch(`/api/projects/${detail.project.id}/versions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -367,7 +517,7 @@ export function GddStudioWorkspace({
   }
 
   async function handleRestoreVersion(versionId: string) {
-    if (readOnly) return;
+    if (readOnly || isGenerating) return;
     const res = await fetch(
       `/api/projects/${detail.project.id}/versions/${versionId}/restore`,
       { method: 'POST' }
@@ -379,7 +529,7 @@ export function GddStudioWorkspace({
   }
 
   async function handleToggleShare() {
-    if (readOnly) return;
+    if (readOnly || isGenerating) return;
     const nextPublic = !detail.project.is_public;
     const res = await fetch(`/api/projects/${detail.project.id}`, {
       method: 'PATCH',
@@ -396,7 +546,7 @@ export function GddStudioWorkspace({
 
   async function handleAddComment(e: React.FormEvent) {
     e.preventDefault();
-    if (!newComment.trim() || readOnly) return;
+    if (!newComment.trim() || readOnly || isGenerating) return;
     const res = await fetch(`/api/projects/${detail.project.id}/comments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -412,7 +562,7 @@ export function GddStudioWorkspace({
   }
 
   async function handleGenerateMoodboard() {
-    if (readOnly) return;
+    if (readOnly || isGenerating) return;
     setIsGeneratingMoodboard(true);
     try {
       const res = await fetch(`/api/projects/${detail.project.id}/moodboard`, {
@@ -440,7 +590,7 @@ export function GddStudioWorkspace({
 
   return (
     <div className="mx-auto max-w-[1440px] px-4 py-5 sm:px-6">
-      {/* Uncluttered Studio Top Bar */}
+      {/* Studio Top Bar */}
       <div
         ref={toolbarRef}
         className="no-print mb-5 rounded-2xl border p-4"
@@ -476,100 +626,161 @@ export function GddStudioWorkspace({
               </span>
               <button
                 type="button"
+                disabled={isGenerating || isAuditing}
                 onClick={handleRunAudit}
-                disabled={isAuditing}
                 aria-label="Abrir auditoria de qualidade"
-                className="rounded-full px-2.5 py-0.5 text-[11px] font-bold transition hover:opacity-90"
+                className="rounded-full px-2.5 py-0.5 text-[11px] font-bold transition hover:opacity-90 disabled:opacity-60"
                 style={{ backgroundColor: 'var(--brand)', color: 'var(--brand-contrast)' }}
               >
-                {isAuditing ? 'Auditando...' : `Score: ${detail.project.completeness_score}%`}
+                {isGenerating
+                  ? `Progresso: ${totalFilledSections}/${detail.sections.length}`
+                  : isAuditing
+                    ? 'Auditando...'
+                    : `Score: ${detail.project.completeness_score}%`}
               </button>
             </div>
             <p className="mt-0.5 text-xs" style={{ color: 'var(--text-muted)' }}>
               {detail.project.studio_name} · {totalFilledSections}/{detail.sections.length} seções
-              preenchidas · {detail.project.depth_mode === 'full' ? 'Bíblia Completa' : 'MVP'}
+              concluídas · {detail.project.depth_mode === 'full' ? 'Bíblia Completa' : 'MVP'}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
             {!readOnly && (
               <>
-                {/* Primary Generation Control with Model Selector Disclosure */}
-                <div className="relative">
-                  <div className="inline-flex">
-                    <button
-                      type="button"
-                      onClick={handleGenerateFullGdd}
-                      disabled={isGenerating}
-                      className="inline-flex min-h-9 items-center gap-1.5 rounded-l-lg px-3.5 py-1.5 text-xs font-bold transition hover:opacity-90 disabled:opacity-60"
-                      style={{
-                        backgroundColor: 'var(--brand)',
-                        color: 'var(--brand-contrast)',
-                      }}
-                    >
-                      <Sparkles className="h-4 w-4" aria-hidden="true" />
-                      <span>
-                        {isGenerating
-                          ? 'Gerando GDD...'
-                          : isBlankProject
-                            ? 'Gerar GDD Completo com IA'
-                            : 'Regenerar GDD'}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      aria-label="Configurar modelo Gemini"
-                      aria-expanded={generateMenuOpen}
-                      onClick={() => {
-                        setGenerateMenuOpen((v) => !v);
-                        setExportOpen(false);
-                        setShareOpen(false);
-                      }}
-                      className="inline-flex min-h-9 items-center rounded-r-lg border-l border-black/15 px-2 text-xs font-bold"
-                      style={{
-                        backgroundColor: 'var(--brand)',
-                        color: 'var(--brand-contrast)',
-                      }}
-                    >
-                      <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-                  </div>
-
-                  {generateMenuOpen && (
-                    <div
-                      className="absolute right-0 top-full z-30 mt-1.5 w-64 rounded-xl border p-3 shadow-xl"
-                      style={{
-                        borderColor: 'var(--border-subtle)',
-                        backgroundColor: 'var(--bg-surface)',
-                      }}
-                    >
-                      <label htmlFor="model-select" className="mb-1.5 block text-xs font-bold">
-                        Modelo Gemini
-                      </label>
-                      <select
-                        id="model-select"
-                        value={selectedModel}
-                        onChange={(e) =>
-                          setSelectedModel(e.target.value as 'gemini-3.8-flash' | 'gemini-4-argon')
-                        }
-                        className="w-full rounded-lg border px-2.5 py-1.5 text-xs"
+                {isGenerating ? (
+                  <>
+                    {centerView !== 'generating' && (
+                      <button
+                        type="button"
+                        onClick={() => setCenterView('generating')}
+                        className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-bold"
                         style={{
-                          borderColor: 'var(--border-subtle)',
+                          borderColor: 'var(--brand)',
+                          color: 'var(--brand)',
                           backgroundColor: 'var(--bg-elevated)',
                         }}
                       >
-                        <option value="gemini-3.8-flash">Gemini 3.8 Flash (Rápido)</option>
-                        <option value="gemini-4-argon">Gemini 4 Argon (Profundo)</option>
-                      </select>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                        <span>Ver Painel Ao Vivo</span>
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={isCancelling}
+                      onClick={handleCancelGeneration}
+                      className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-bold text-white transition hover:opacity-90 disabled:opacity-60"
+                      style={{ backgroundColor: 'var(--danger)' }}
+                    >
+                      <Square className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
+                      <span>{isCancelling ? 'Cancelando...' : 'Cancelar Geração'}</span>
+                    </button>
+                  </>
+                ) : (
+                  <div className="relative">
+                    <div className="inline-flex">
+                      {hasPartialProgress ? (
+                        <button
+                          type="button"
+                          onClick={() => handleStartGeneration({ resumeOnlyMissing: true })}
+                          className="inline-flex min-h-9 items-center gap-1.5 rounded-l-lg px-3.5 py-1.5 text-xs font-bold transition hover:opacity-90"
+                          style={{
+                            backgroundColor: 'var(--brand)',
+                            color: 'var(--brand-contrast)',
+                          }}
+                        >
+                          <Play className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
+                          <span>Continuar Geração ({pendingStages.length} estágios)</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleStartGeneration({ resumeOnlyMissing: false })}
+                          className="inline-flex min-h-9 items-center gap-1.5 rounded-l-lg px-3.5 py-1.5 text-xs font-bold transition hover:opacity-90"
+                          style={{
+                            backgroundColor: 'var(--brand)',
+                            color: 'var(--brand-contrast)',
+                          }}
+                        >
+                          <Sparkles className="h-4 w-4" aria-hidden="true" />
+                          <span>
+                            {isBlankProject ? 'Gerar GDD Completo com IA' : 'Regenerar GDD'}
+                          </span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        aria-label="Opções de geração e modelo Gemini"
+                        aria-expanded={generateMenuOpen}
+                        onClick={() => {
+                          setGenerateMenuOpen((v) => !v);
+                          setExportOpen(false);
+                          setShareOpen(false);
+                        }}
+                        className="inline-flex min-h-9 items-center rounded-r-lg border-l border-black/15 px-2 text-xs font-bold"
+                        style={{
+                          backgroundColor: 'var(--brand)',
+                          color: 'var(--brand-contrast)',
+                        }}
+                      >
+                        <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                      </button>
                     </div>
-                  )}
-                </div>
+
+                    {generateMenuOpen && (
+                      <div
+                        className="absolute right-0 top-full z-30 mt-1.5 w-64 space-y-3 rounded-xl border p-3 shadow-xl"
+                        style={{
+                          borderColor: 'var(--border-subtle)',
+                          backgroundColor: 'var(--bg-surface)',
+                        }}
+                      >
+                        <div>
+                          <label htmlFor="model-select" className="mb-1.5 block text-xs font-bold">
+                            Modelo Gemini
+                          </label>
+                          <select
+                            id="model-select"
+                            value={selectedModel}
+                            onChange={(e) =>
+                              setSelectedModel(
+                                e.target.value as 'gemini-3.8-flash' | 'gemini-4-argon'
+                              )
+                            }
+                            className="w-full rounded-lg border px-2.5 py-1.5 text-xs"
+                            style={{
+                              borderColor: 'var(--border-subtle)',
+                              backgroundColor: 'var(--bg-elevated)',
+                            }}
+                          >
+                            <option value="gemini-3.8-flash">Gemini 3.8 Flash (Rápido)</option>
+                            <option value="gemini-4-argon">Gemini 4 Argon (Profundo)</option>
+                          </select>
+                        </div>
+                        {hasPartialProgress && (
+                          <button
+                            type="button"
+                            onClick={() => handleStartGeneration({ resumeOnlyMissing: false })}
+                            className="w-full rounded-lg border px-3 py-1.5 text-xs font-semibold"
+                            style={{
+                              borderColor: 'var(--border-subtle)',
+                              backgroundColor: 'var(--bg-elevated)',
+                            }}
+                          >
+                            Regenerar Tudo do Zero
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <button
                   type="button"
                   onClick={handleRunAudit}
-                  disabled={isAuditing}
-                  className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold"
+                  disabled={isAuditing || isGenerating}
+                  className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45"
                   style={{
                     borderColor: 'var(--border-subtle)',
                     backgroundColor: 'var(--bg-elevated)',
@@ -585,13 +796,14 @@ export function GddStudioWorkspace({
             <div className="relative">
               <button
                 type="button"
+                disabled={isGenerating}
                 aria-expanded={exportOpen}
                 onClick={() => {
                   setExportOpen((v) => !v);
                   setShareOpen(false);
                   setGenerateMenuOpen(false);
                 }}
-                className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold"
+                className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45"
                 style={{
                   borderColor: 'var(--border-subtle)',
                   backgroundColor: 'var(--bg-elevated)',
@@ -602,7 +814,7 @@ export function GddStudioWorkspace({
                 <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
 
-              {exportOpen && (
+              {exportOpen && !isGenerating && (
                 <div
                   className="absolute right-0 top-full z-30 mt-1.5 w-60 space-y-1 rounded-xl border p-2 shadow-xl"
                   style={{
@@ -660,13 +872,14 @@ export function GddStudioWorkspace({
               <div className="relative">
                 <button
                   type="button"
+                  disabled={isGenerating}
                   aria-expanded={shareOpen}
                   onClick={() => {
                     setShareOpen((v) => !v);
                     setExportOpen(false);
                     setGenerateMenuOpen(false);
                   }}
-                  className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold"
+                  className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45"
                   style={{
                     borderColor: detail.project.is_public ? 'var(--brand)' : 'var(--border-subtle)',
                     backgroundColor: 'var(--bg-elevated)',
@@ -676,7 +889,7 @@ export function GddStudioWorkspace({
                   <span>{detail.project.is_public ? 'Público' : 'Compartilhar'}</span>
                 </button>
 
-                {shareOpen && (
+                {shareOpen && !isGenerating && (
                   <div
                     className="absolute right-0 top-full z-30 mt-1.5 w-72 space-y-3 rounded-xl border p-3.5 shadow-xl"
                     style={{
@@ -699,7 +912,13 @@ export function GddStudioWorkspace({
                       </button>
                     </div>
                     {shareUrl ? (
-                      <div className="rounded-lg border p-2 text-xs" style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-elevated)' }}>
+                      <div
+                        className="rounded-lg border p-2 text-xs"
+                        style={{
+                          borderColor: 'var(--border-subtle)',
+                          backgroundColor: 'var(--bg-elevated)',
+                        }}
+                      >
                         <a
                           href={shareUrl}
                           className="break-all font-semibold underline"
@@ -721,9 +940,10 @@ export function GddStudioWorkspace({
             {!readOnly && (
               <button
                 type="button"
+                disabled={isGenerating}
                 aria-expanded={assistantOpen}
                 onClick={() => setAssistantOpen((v) => !v)}
-                className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold"
+                className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45"
                 style={{
                   borderColor: assistantOpen ? 'var(--brand)' : 'var(--border-subtle)',
                   backgroundColor: assistantOpen ? 'var(--brand)' : 'var(--bg-elevated)',
@@ -741,22 +961,6 @@ export function GddStudioWorkspace({
           </div>
         </div>
 
-        {genProgressText && (
-          <div
-            className="mt-3 rounded-xl border p-3 text-xs"
-            style={{ borderColor: 'var(--brand)', backgroundColor: 'var(--bg-elevated)' }}
-          >
-            <p className="font-bold" style={{ color: 'var(--brand)' }}>
-              {genProgressText}
-            </p>
-            {streamPreview && (
-              <pre className="mt-2 max-h-24 overflow-hidden whitespace-pre-wrap font-mono text-[11px] opacity-80">
-                {streamPreview}
-              </pre>
-            )}
-          </div>
-        )}
-
         {statusBanner && (
           <p
             role="status"
@@ -768,9 +972,9 @@ export function GddStudioWorkspace({
         )}
       </div>
 
-      {/* 3-Zone Studio Grid (Assistant closed by default for maximum reading area) */}
+      {/* 3-Zone Studio Grid */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-        {/* Left Navigation: Grouped Sections + Global Project Tools */}
+        {/* Left Navigation: Progressive Section Locking + Global Tools */}
         <aside className="no-print lg:col-span-3">
           <div
             className="studio-scroll max-h-[78dvh] space-y-4 overflow-y-auto rounded-2xl border p-3"
@@ -780,12 +984,34 @@ export function GddStudioWorkspace({
             }}
           >
             <nav aria-label="Seções do GDD" className="space-y-2.5">
-              <p
-                className="px-2 text-[11px] font-bold uppercase tracking-wider"
-                style={{ color: 'var(--text-muted)' }}
-              >
-                Seções do Documento ({detail.sections.length})
-              </p>
+              <div className="flex items-center justify-between px-2">
+                <p
+                  className="text-[11px] font-bold uppercase tracking-wider"
+                  style={{ color: 'var(--text-muted)' }}
+                >
+                  Seções ({totalFilledSections}/{detail.sections.length})
+                </p>
+                {!isGenerating && !readOnly && totalFilledSections < detail.sections.length && (
+                  <button
+                    type="button"
+                    onClick={() => setManualUnlockAll((v) => !v)}
+                    className="inline-flex items-center gap-1 text-[10px] font-semibold underline"
+                    style={{ color: 'var(--brand)' }}
+                  >
+                    {manualUnlockAll ? (
+                      <>
+                        <Lock className="h-2.5 w-2.5" aria-hidden="true" />
+                        <span>Travar vazias</span>
+                      </>
+                    ) : (
+                      <>
+                        <Unlock className="h-2.5 w-2.5" aria-hidden="true" />
+                        <span>Editar vazias</span>
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
 
               {sectionGroups.map((group) => {
                 const isCollapsed = collapsedGroups[group.id];
@@ -816,38 +1042,63 @@ export function GddStudioWorkspace({
                             centerView === 'section' && sec.section_number === activeSectionNumber;
                           const isApproved = sec.review_status === 'approved';
                           const isFilled = sec.word_count > 0;
+                          const isInCurrentGeneratingStage =
+                            isGenerating &&
+                            Boolean(activeStageSpec?.sectionNumbers.includes(sec.section_number));
+                          const isLocked = isGenerating
+                            ? !isFilled
+                            : !isFilled && !manualUnlockAll && !readOnly;
+
                           return (
                             <button
                               key={sec.id}
                               type="button"
+                              disabled={isLocked}
                               onClick={() => handleSelectSection(sec)}
-                              className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition"
+                              title={
+                                isInCurrentGeneratingStage
+                                  ? 'Gerando esta seção com IA agora...'
+                                  : isLocked
+                                    ? 'Seção aguardando geração pela IA'
+                                    : sec.title
+                              }
+                              className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition disabled:cursor-not-allowed disabled:opacity-50"
                               style={{
                                 backgroundColor: selected ? 'var(--brand)' : 'transparent',
                                 color: selected ? 'var(--brand-contrast)' : 'var(--text-primary)',
                               }}
                             >
                               <span className="flex min-w-0 items-center gap-1.5">
-                                {isApproved ? (
+                                {isInCurrentGeneratingStage ? (
+                                  <Loader2
+                                    className="h-3.5 w-3.5 shrink-0 animate-spin"
+                                    style={{ color: 'var(--brand)' }}
+                                    aria-hidden="true"
+                                  />
+                                ) : isApproved ? (
                                   <CheckCircle2
                                     className="h-3.5 w-3.5 shrink-0 text-emerald-400"
                                     aria-hidden="true"
                                   />
                                 ) : isFilled ? (
                                   <CircleDot
-                                    className="h-3.5 w-3.5 shrink-0 opacity-80"
+                                    className="h-3.5 w-3.5 shrink-0 text-emerald-400"
                                     aria-hidden="true"
                                   />
                                 ) : (
-                                  <Circle
-                                    className="h-3.5 w-3.5 shrink-0 opacity-40"
+                                  <Lock
+                                    className="h-3.5 w-3.5 shrink-0 opacity-60"
                                     aria-hidden="true"
                                   />
                                 )}
                                 <span className="truncate font-medium">{sec.title}</span>
                               </span>
                               <span className="shrink-0 text-[10px] opacity-75">
-                                {isFilled ? `${sec.word_count}w` : 'vazio'}
+                                {isInCurrentGeneratingStage
+                                  ? 'gerando'
+                                  : isFilled
+                                    ? `${sec.word_count}w`
+                                    : 'bloqueada'}
                               </span>
                             </button>
                           );
@@ -869,8 +1120,9 @@ export function GddStudioWorkspace({
               <div className="space-y-1">
                 <button
                   type="button"
+                  disabled={isGenerating}
                   onClick={() => setCenterView('entities')}
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold"
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45"
                   style={{
                     backgroundColor: centerView === 'entities' ? 'var(--brand)' : 'transparent',
                     color:
@@ -883,8 +1135,9 @@ export function GddStudioWorkspace({
 
                 <button
                   type="button"
+                  disabled={isGenerating}
                   onClick={() => setCenterView('moodboard')}
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold"
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45"
                   style={{
                     backgroundColor: centerView === 'moodboard' ? 'var(--brand)' : 'transparent',
                     color:
@@ -898,8 +1151,9 @@ export function GddStudioWorkspace({
                 {!readOnly && (
                   <button
                     type="button"
+                    disabled={isGenerating}
                     onClick={() => setCenterView('versions')}
-                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold"
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45"
                     style={{
                       backgroundColor: centerView === 'versions' ? 'var(--brand)' : 'transparent',
                       color:
@@ -917,12 +1171,132 @@ export function GddStudioWorkspace({
           </div>
         </aside>
 
-        {/* Center Main Reading/Editing Workspace */}
+        {/* Center Workspace */}
         <section
           className={`min-w-0 space-y-4 ${
-            assistantOpen && !readOnly ? 'lg:col-span-6' : 'lg:col-span-9'
+            assistantOpen && !readOnly && !isGenerating ? 'lg:col-span-6' : 'lg:col-span-9'
           }`}
         >
+          {/* Dedicated Live Generation Panel */}
+          {centerView === 'generating' && (
+            <div
+              aria-live="polite"
+              className="space-y-5 rounded-2xl border p-6"
+              style={{
+                borderColor: 'var(--brand)',
+                backgroundColor: 'var(--bg-surface)',
+              }}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Loader2
+                      className="h-5 w-5 animate-spin"
+                      style={{ color: 'var(--brand)' }}
+                      aria-hidden="true"
+                    />
+                    <h2 className="text-xl font-extrabold">
+                      Gerando seu Game Design Document
+                    </h2>
+                  </div>
+                  <p className="text-xs sm:text-sm" style={{ color: 'var(--text-muted)' }}>
+                    {liveStatusText} · Tempo decorrido: <strong>{elapsedSeconds}s</strong>
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={isCancelling}
+                  onClick={handleCancelGeneration}
+                  className="inline-flex min-h-9 items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-bold text-white transition hover:opacity-90 disabled:opacity-60"
+                  style={{ backgroundColor: 'var(--danger)' }}
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
+                  <span>
+                    {isCancelling
+                      ? 'Cancelando...'
+                      : 'Cancelar e Manter Seções Concluídas'}
+                  </span>
+                </button>
+              </div>
+
+              {/* Semantic Progress Bar */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs font-semibold">
+                  <span>Progresso Geral</span>
+                  <span>{progressPercent}%</span>
+                </div>
+                <progress
+                  value={progressPercent}
+                  max={100}
+                  aria-label="Progresso da geração do GDD"
+                  className="h-3 w-full overflow-hidden rounded-full"
+                />
+              </div>
+
+              {/* Stage-by-Stage Checklist */}
+              <ol className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                {allStages.map((stage) => {
+                  const isDone = completedStageNums.includes(stage.stageNumber);
+                  const isActive = activeStageNum === stage.stageNumber;
+                  return (
+                    <li
+                      key={stage.stageNumber}
+                      className="flex items-start gap-2.5 rounded-xl border p-3 text-xs"
+                      style={{
+                        borderColor: isActive || isDone ? 'var(--brand)' : 'var(--border-subtle)',
+                        backgroundColor: 'var(--bg-elevated)',
+                      }}
+                    >
+                      {isDone ? (
+                        <CheckCircle2
+                          className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500"
+                          aria-hidden="true"
+                        />
+                      ) : isActive ? (
+                        <Loader2
+                          className="mt-0.5 h-4 w-4 shrink-0 animate-spin"
+                          style={{ color: 'var(--brand)' }}
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <Lock
+                          className="mt-0.5 h-4 w-4 shrink-0 opacity-50"
+                          aria-hidden="true"
+                        />
+                      )}
+                      <div>
+                        <p className="font-bold">Estágio {stage.stageNumber}</p>
+                        <p className="mt-0.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                          {stage.label}
+                        </p>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+
+              {/* Live Streaming Output Preview */}
+              <div
+                className="rounded-xl border p-4"
+                style={{
+                  borderColor: 'var(--border-subtle)',
+                  backgroundColor: 'var(--bg-elevated)',
+                }}
+              >
+                <p
+                  className="mb-2 text-[11px] font-bold uppercase tracking-wider"
+                  style={{ color: 'var(--text-muted)' }}
+                >
+                  Prévia em Tempo Real (As seções concluídas são liberadas à esquerda)
+                </p>
+                <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap font-mono text-xs leading-relaxed">
+                  {streamPreview || 'Aguardando os primeiros tokens da Gemini AI...'}
+                </pre>
+              </div>
+            </div>
+          )}
+
           {centerView === 'section' && activeSection && (
             <div
               className="rounded-2xl border p-6"
@@ -968,9 +1342,10 @@ export function GddStudioWorkspace({
                       <button
                         type="button"
                         role="tab"
+                        disabled={isGenerating}
                         aria-selected={sectionMode === 'read'}
                         onClick={() => setSectionMode('read')}
-                        className="inline-flex min-h-8 items-center gap-1 rounded-md px-2.5 text-xs font-semibold"
+                        className="inline-flex min-h-8 items-center gap-1 rounded-md px-2.5 text-xs font-semibold disabled:opacity-50"
                         style={{
                           backgroundColor:
                             sectionMode === 'read' ? 'var(--brand)' : 'transparent',
@@ -984,9 +1359,10 @@ export function GddStudioWorkspace({
                       <button
                         type="button"
                         role="tab"
+                        disabled={isGenerating}
                         aria-selected={sectionMode === 'edit'}
                         onClick={() => setSectionMode('edit')}
-                        className="inline-flex min-h-8 items-center gap-1 rounded-md px-2.5 text-xs font-semibold"
+                        className="inline-flex min-h-8 items-center gap-1 rounded-md px-2.5 text-xs font-semibold disabled:opacity-50"
                         style={{
                           backgroundColor:
                             sectionMode === 'edit' ? 'var(--brand)' : 'transparent',
@@ -1001,11 +1377,12 @@ export function GddStudioWorkspace({
 
                     <button
                       type="button"
+                      disabled={isGenerating}
                       onClick={() => {
                         setAssistantTab('copilot');
                         setAssistantOpen(true);
                       }}
-                      className="inline-flex min-h-8 items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold"
+                      className="inline-flex min-h-8 items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold disabled:opacity-50"
                       style={{
                         borderColor: 'var(--border-subtle)',
                         backgroundColor: 'var(--bg-elevated)',
@@ -1017,8 +1394,9 @@ export function GddStudioWorkspace({
 
                     <button
                       type="button"
+                      disabled={isGenerating}
                       onClick={() => handleSaveSection('approved')}
-                      className="inline-flex min-h-8 items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium"
+                      className="inline-flex min-h-8 items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium disabled:opacity-50"
                       style={{ borderColor: 'var(--border-subtle)' }}
                     >
                       <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
@@ -1028,7 +1406,7 @@ export function GddStudioWorkspace({
                 )}
               </div>
 
-              {/* Contextual Help Banner for the Active Section */}
+              {/* Contextual Help Banner */}
               {sectionTipOpen && activeSectionMeta && !readOnly && (
                 <div
                   className="no-print mb-5 rounded-xl border p-3.5 text-xs"
@@ -1040,7 +1418,8 @@ export function GddStudioWorkspace({
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="space-y-1">
                       <p className="font-bold">
-                        O que vai aqui: <span className="font-normal">{activeSectionMeta.summary}</span>
+                        O que vai aqui:{' '}
+                        <span className="font-normal">{activeSectionMeta.summary}</span>
                       </p>
                       <p style={{ color: 'var(--text-muted)' }}>
                         <strong>Por que importa:</strong> {activeSectionMeta.whyItMatters}
@@ -1072,14 +1451,18 @@ export function GddStudioWorkspace({
                         backgroundColor: 'var(--bg-elevated)',
                       }}
                     >
-                      <p className="text-sm font-semibold">Esta seção ainda está vazia.</p>
+                      <p className="text-sm font-semibold">Esta seção ainda não foi gerada.</p>
                       <p className="mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-                        Gere todo o GDD automaticamente ou edite manualmente esta seção.
+                        {hasPartialProgress
+                          ? 'Clique em "Continuar Geração" para preencher as seções restantes com a IA.'
+                          : 'Gere todo o GDD automaticamente ou libere a edição manual.'}
                       </p>
                       <div className="mt-4 flex flex-wrap justify-center gap-2">
                         <button
                           type="button"
-                          onClick={handleGenerateFullGdd}
+                          onClick={() =>
+                            handleStartGeneration({ resumeOnlyMissing: hasPartialProgress })
+                          }
                           disabled={isGenerating}
                           className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-4 py-1.5 text-xs font-bold"
                           style={{
@@ -1088,11 +1471,18 @@ export function GddStudioWorkspace({
                           }}
                         >
                           <Sparkles className="h-4 w-4" aria-hidden="true" />
-                          <span>Gerar GDD Completo com IA</span>
+                          <span>
+                            {hasPartialProgress
+                              ? 'Continuar Geração com IA'
+                              : 'Gerar GDD Completo com IA'}
+                          </span>
                         </button>
                         <button
                           type="button"
-                          onClick={() => setSectionMode('edit')}
+                          onClick={() => {
+                            setManualUnlockAll(true);
+                            setSectionMode('edit');
+                          }}
                           className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-4 py-1.5 text-xs font-semibold"
                           style={{ borderColor: 'var(--border-subtle)' }}
                         >
@@ -1173,7 +1563,9 @@ export function GddStudioWorkspace({
                 projectId={detail.project.id}
                 entities={detail.entities}
                 readOnly={readOnly}
-                onChanged={refreshProject}
+                onChanged={async () => {
+                  await refreshProject();
+                }}
               />
             </div>
           )}
@@ -1338,7 +1730,7 @@ export function GddStudioWorkspace({
         </section>
 
         {/* Retractable Right Panel: Copilot AI & Section Notes (Closed by Default) */}
-        {assistantOpen && !readOnly && (
+        {assistantOpen && !readOnly && !isGenerating && (
           <aside
             aria-label="Assistente Copiloto e Notas"
             className="no-print lg:col-span-3"

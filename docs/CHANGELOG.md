@@ -5,20 +5,29 @@ All notable changes, resource insertions, database migrations, documentation upd
 ## [Unreleased] - 2026-11-17
 
 ### Added
+- **Usability v3 — Safe Cancellation, Partial Resume & Live SSE Progress (`src/app/api/projects/[id]/generate/cancel/route.ts`, `src/lib/gdd/prompt-builder.ts`, `src/components/GddStudioWorkspace.tsx`)**:
+  - Added `POST /api/projects/[id]/generate/cancel` and `resumeOnlyMissing` support via `getPendingStages()` / `getStageForSection()` so users can cancel generation mid-run without losing completed stages and resume only remaining stages (`Continuar Geração`).
+  - Added a dedicated `'generating'` live progress view in `GddStudioWorkspace.tsx` with semantic `<progress>`, elapsed timer, 4-stage checklist, live streaming text preview, and cancellation actions.
 - **Dedicated 3-Step Creation Route (`src/app/new/page.tsx`)**: Moved creation flow out of `/` into a focused 3-step Wizard supporting `?template=<slug>` pre-loading.
 - **Interactive Tutorial Page (`src/app/guide/page.tsx`, `docs/TUTORIAL.md`)**: Added in-app tutorial explaining the full workflow and every one of the 15 GDD sections grouped into Blocks A–D.
 - **Project Hub Component (`src/components/ProjectsDashboardClient.tsx`)**: Added project search, quick-start template links, and accessible `<dialog>` deletion confirmation on `/`.
 - **Section Discipline Metadata (`src/lib/gdd/sections.ts`, `src/types/gdd.ts`)**: Added `getSectionGroups()`, `getSectionDefinitionByNumber()`, contextual `summary`, `whyItMatters`, `specialToolHint`, and `exampleRefinePrompts` per section.
 
 ### Changed
+- **Wizard Double-Submit Protection (`src/components/NewGddWizard.tsx`)**: Added route prefetching on Step 3, kept `submitting = true` permanently after `POST /api/projects` succeeds until navigation completes, disabled `Voltar`, and replaced `router.push` + `router.refresh()` with `router.replace()`.
+- **SSE Heartbeats & Abort Propagation (`src/lib/ai/gemini.ts`, `src/app/api/projects/[id]/generate/route.ts`)**: Added `AbortSignal` forwarding, `withModelFallback` status callbacks, `stage_status` / 2.5s `stage_heartbeat` events, partial entity/audit resync on cancellation, and `{ resumeOnlyMissing }` support.
+- **Progressive Section Locking (`src/components/GddStudioWorkspace.tsx`)**: Locked pending/empty sidebar sections and disabled conflicting Studio actions (`Auditar Qualidade`, `Exportar`, `Compartilhar`, `Copiloto & Notas`, `Tabelas`, `Moodboard Visual`, `Versões`) during active generation; added `"Editar vazias"` / `"Travar vazias"` toggle outside generation.
 - **3-Step Wizard (`src/components/NewGddWizard.tsx`)**: Refactored single long form into progressive 3-step stepper (`Ideia & Template` → `Arquitetura & Escopo` → `Formato & Geração`).
 - **3-Zone Studio Workspace (`src/components/GddStudioWorkspace.tsx`, `src/components/Navbar.tsx`)**: Grouped sidebar sections into collapsible Blocks A–D separated from global project tools (`Tabelas`, `Moodboard`, `Versões`), consolidated `Exportar` and `Compartilhar` into clean disclosure panels, added contextual per-section help banner, and made the Right Copilot & Notes drawer closed by default.
 
+### Database
+- **Migration `0004_job_cancelled_status.sql`**: Added `'cancelled'` to `gdd_generation_jobs_status_check` in Supabase.
+
 ### Tests
-- **Playwright (`tests/unit/sections-metadata.spec.ts`, `tests/e2e/gdd-studio.spec.ts`)**: Added unit tests for section grouping/metadata and updated E2E suite for `/guide`, `/new` 3-step flow, Studio drawer state, and Export/Share disclosures.
+- **Playwright (`tests/unit/prompt-builder.spec.ts`, `tests/unit/sections-metadata.spec.ts`, `tests/api/gdd-api.spec.ts`, `tests/e2e/gdd-studio.spec.ts`)**: Added unit tests for `getPendingStages`/`getStageForSection` and section metadata; added API tests for `/generate/cancel` and `resumeOnlyMissing`; updated E2E suite for `/guide`, `/new` submit lock, live `<progress>`, progressive section unlocking, mid-stream cancel & resume, Studio drawer state, and Export/Share disclosures.
 
 ### Docs
-- Created `docs/TUTORIAL.md` and `docs/FEATURES/layout-studio-v2.md`; updated `docs/ARCHITECTURE.md` and `docs/CHANGELOG.md`.
+- Created `docs/TUTORIAL.md`, `docs/FEATURES/layout-studio-v2.md`, and `docs/FEATURES/usability-v3.md`; updated `docs/ARCHITECTURE.md`, `docs/DATABASE.md`, `docs/API.md`, and `docs/CHANGELOG.md`.
 
 ## [0.1.0] - 2026-11-16
 
